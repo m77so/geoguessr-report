@@ -29,9 +29,12 @@ STREET_API_KEY=あなたのStreet View Static APIキー
 
 ## 使い方
 
-1. 依存パッケージのインストール
+
+1. 依存パッケージのインストール（uv推奨）
    ```sh
-   uv pip install -r requirements.txt  # または pyproject.toml/uv.lock を利用
+   uv pip install -r pyproject.toml
+   # もしくは
+   uv pip install
    ```
 
 2. レポート生成の実行
