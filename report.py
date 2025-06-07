@@ -194,7 +194,7 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
         }
 
 
-def main(geoguessr_replay_url,cookie_file_path ):
+def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-05-20"):
 
     # 環境変数からAPIキーを取得
     GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -211,8 +211,13 @@ def main(geoguessr_replay_url,cookie_file_path ):
         return
 
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-preview-05-20", google_api_key=GOOGLE_API_KEY)
-        print("LangChain経由でGemini 2.5 Flash モデルを初期化しました。\n")
+    
+        llm = ChatGoogleGenerativeAI(
+            model=args.model,
+            google_api_key=GOOGLE_API_KEY,
+            temperature=0.3,
+        )
+        print(f"LangChain経由で{args.model} モデルを初期化しました。\n")
     except Exception as e:
         print(f"モデルの初期化に失敗しました: {e}")
         return
@@ -354,5 +359,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GeoGuessrリプレイURLとCookieファイルを指定してレポートを生成します。")
     parser.add_argument("--url", required=True, help="GeoGuessrのリプレイURL (例: https://www.geoguessr.com/duels/xxxx/replay)")
     parser.add_argument("--cookie", required=True, help="GeoGuessrのCookieファイルパス (例: cookies.txt)")
+    parser.add_argument("--model", default="gemini-2.5-flash-preview-05-20", help="使用するGeminiモデル (デフォルト: gemini-2.5-flash-preview-05-20)")
     args = parser.parse_args()
-    main(args.url, args.cookie)
+    main(args.url, args.cookie, args.model)
