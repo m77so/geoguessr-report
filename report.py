@@ -351,7 +351,8 @@ def main(geoguessr_replay_url,cookie_file_path ):
     print(f"処理が完了しました。結果は '{markdown_output_file}' を参照してください。")
 
 if __name__ == "__main__":
-    main(
-        "https://www.geoguessr.com/duels/94bb58f5-53b1-47aa-9e01-81b7bca8f3bb/replay",
-        "cookies.txt"
-    )
+    parser = argparse.ArgumentParser(description="GeoGuessrリプレイURLとCookieファイルを指定してレポートを生成します。")
+    parser.add_argument("--url", required=True, help="GeoGuessrのリプレイURL (例: https://www.geoguessr.com/duels/xxxx/replay)")
+    parser.add_argument("--cookie", required=True, help="GeoGuessrのCookieファイルパス (例: cookies.txt)")
+    args = parser.parse_args()
+    main(args.url, args.cookie)
