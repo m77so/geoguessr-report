@@ -17,7 +17,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # util.py から提供された関数と定数をインポート
-from util import save_street_view_pano_image, get_geoguessr_replay_rounds_data, DEFAULT_OUTPUT_DIR
+from util import save_street_view_pano_image, get_geoguessr_replay_data, DEFAULT_OUTPUT_DIR
 
 load_dotenv()
 
@@ -124,7 +124,7 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
 
         # 1. 最初のメッセージを作成（場所の予測依頼 + ★座標出力の指示を追加）
         first_prompt_text = (
-          "あなたはGeoGuessrの専門家です。ストリートビュー画像から場所を推測し、その根拠を画像内の特徴と関連付けて説明してください。\n\n"
+          "あなたはGeoGuessrの専門家です。ストリートビュー画像から場所を推測し、その根拠を画像内の特徴と関連付けて説明してください。類似している地域を否定する理由も述べてください\n\n"
           "【出力形式のルール】\n"
           "1. 推測する場所と、その理由を詳しく述べます。\n"
           "2. 画像内の具体的な特徴に言及する際は、その位置を必ず `BOX(y_min, x_min, y_max, x_max)` という形式で文中に示してください。\n"
@@ -160,7 +160,7 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
         print("  LLMに正解を伝え、追加のヒントを依頼中...")
         second_prompt_text = (
             f"ありがとう。実は、この場所の正確な位置は {correct_location_str} でした。"
-            f"あなたの先ほどの予測と比べてどうでしたか？"
+            f"あなたの先ほどの予測と比べてどうでしたか？また、プレイヤーの推測に対しても批評してください。"
             f"この場所特有のGeoGuessrで使えるヒントや、今後の推測に役立つ特徴（道路標識、植生、建築様式、電柱、車両、ナンバープレートなど）があれば具体的に教えてください。"
             f"特に、画像から読み取れる視覚的な手掛かりを優先し、その場所を BOX(y_min, x_min, y_max, x_max) 形式で示してください。"
         )
@@ -192,6 +192,7 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
             "annotated_hint_path": None,
             "error": f"{type(e).__name__}: {e}"
         }
+
 
 
 def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-05-20"):
@@ -229,11 +230,11 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
 
     print("\n--- GeoGuessr リプレイデータ取得 ---")
     try:
-        rounds_data = get_geoguessr_replay_rounds_data(geoguessr_replay_url, cookie_file_path)
-        if not rounds_data:
+        replay_data = get_geoguessr_replay_data(geoguessr_replay_url, cookie_file_path, player_nick=args.player_nickname)
+        if not replay_data['rounds']:
             print("リプレイデータが見つかりませんでした。URLまたはCookieファイルを確認してください。")
             return
-        print(f"合計 {len(rounds_data)} ラウンドのデータが見つかりました。")
+        print(f"合計 {len(replay_data['rounds'])} ラウンドのデータが見つかりました。")
     except FileNotFoundError as e:
         print(f"エラー: {e}")
         print("Cookieファイルのパスが正しいか確認してください。")
@@ -244,7 +245,7 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
 
     review_results = []
 
-    for i, round_data in enumerate(rounds_data):
+    for i, round_data in enumerate(replay_data['rounds']):
         round_number = round_data.get("roundNumber", i + 1)
         panorama = round_data.get("panorama", {})
         pano_id = panorama.get("panoId")
@@ -269,6 +270,16 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
         print(f"\n--- ラウンド {round_number} の処理を開始 ---")
         correct_country_name = get_country_name(country_code)
         correct_location_str = f"{correct_country_name} (Lat: {lat:.4f}, Lng: {lng:.4f})"
+
+        if replay_data.get("player_guesses"):
+            player_guess = replay_data["player_guesses"][i] if i < len(replay_data["player_guesses"]) else None
+            if player_guess:
+                guess_lat = player_guess.get("lat")
+                guess_lng = player_guess.get("lng")
+                if guess_lat is not None and guess_lng is not None:
+                    correct_location_str += f" 、プレイヤーの推測は: （Lat: {guess_lat:.4f}, Lng: {guess_lng:.4f})"
+                else:
+                    print(f"  ラウンド {round_number} のプレイヤーの推測が不完全なため、正解の場所のみを表示します。")
         # 1. 画像のダウンロード
         print(f"  パノラマID '{pano_id}' の画像をダウンロード中...")
         image_path = save_street_view_pano_image(pano_id, output_dir=IMAGE_SAVE_DIR, api_key=STREET_API_KEY)
@@ -360,5 +371,6 @@ if __name__ == "__main__":
     parser.add_argument("--url", required=True, help="GeoGuessrのリプレイURL (例: https://www.geoguessr.com/duels/xxxx/replay)")
     parser.add_argument("--cookie", required=True, help="GeoGuessrのCookieファイルパス (例: cookies.txt)")
     parser.add_argument("--model", default="gemini-2.5-flash-preview-05-20", help="使用するGeminiモデル (デフォルト: gemini-2.5-flash-preview-05-20)")
+    parser.add_argument("--player_nickname", default="LangChain", help="プレイヤーのニックネーム (デフォルト: LangChain)")
     args = parser.parse_args()
     main(args.url, args.cookie, args.model)

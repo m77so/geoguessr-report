@@ -39,7 +39,20 @@ def _load_cookies_from_file(filename: str) -> str:
     except Exception as e:
         raise IOError(f"エラー: Cookieファイルの読み込み中に問題が発生しました: {e}")
 
-def get_geoguessr_replay_rounds_data(url: str, cookie_file_path: str) -> list:
+def get_player_guesses(teams_data, player_nick):
+    # teams_data = parsed_json.get('props', {}).get('pageProps', {}).get('game', {}).get('teams', [])
+    for team in teams_data:
+    # チーム内の全てのプレイヤーをループ
+      for player in team['players']:
+          print(player)
+          # プレイヤーのニックネームが指定されたものと一致するかチェック
+          if player.get('nick') == player_nick:
+              # 一致したら、そのプレイヤーの'guesses'リストを返す
+              return player.get('guesses', [])
+    # 一致するプレイヤーが見つからなかった場合は空のリストを返す
+    return []
+
+def get_geoguessr_replay_data(url: str, cookie_file_path: str, player_nick: str = None) -> dict:
     """
     指定されたGeoGuessrのリプレイURLからゲームのラウンドデータをスクレイピングして返します。
 
@@ -48,8 +61,9 @@ def get_geoguessr_replay_rounds_data(url: str, cookie_file_path: str) -> list:
         cookie_file_path (str): Cookie文字列が保存されているファイルのパス。
 
     Returns:
-        list: 抽出されたラウンドデータのリスト（`game.rounds` の内容）。
+        dict: 抽出されたラウンドデータの辞書（`game.rounds` の内容）。
               データが見つからない場合や空の場合は空のリストを返します。
+        dict: プレイヤーの推測データ（`player_guesses`）も含まれる場合があります。
 
     Raises:
         FileNotFoundError: Cookieファイルが見つからない場合。
@@ -58,8 +72,12 @@ def get_geoguessr_replay_rounds_data(url: str, cookie_file_path: str) -> list:
         json.JSONDecodeError: 取得したHTMLからJSONをパースできない場合。
         ValueError: 必要なデータ構造（`__NEXT_DATA__` スクリプトタグ、またはその中のJSONパス）が見つからない場合。
     """
-    print(f"URL: {url} からデータを取得中...")
+    function_return_object = {
+        'rounds': [],
+        'player_guesses': []
+    }
 
+    print(f"URL: {url} からデータを取得中...")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,/;q=0.8',
@@ -101,12 +119,22 @@ def get_geoguessr_replay_rounds_data(url: str, cookie_file_path: str) -> list:
     parsed_json = json.loads(json_data_str)
     
     # ユーザーが指定したパスで game.rounds データを抽出
-    rounds_data = parsed_json.get('props', {}).get('pageProps', {}).get('game', {}).get('rounds', [])
+    function_return_object['rounds'] = parsed_json.get('props', {}).get('pageProps', {}).get('game', {}).get('rounds', [])
 
-    if not rounds_data:
+    if player_nick:
+        print(f"プレイヤー '{player_nick}' の推測データを取得中...")
+        player_guesses = get_player_guesses(parsed_json.get('props', {}).get('pageProps', {}).get('game', {}).get('teams', []), player_nick)
+        if player_guesses:
+            print(f"プレイヤー '{player_nick}' の推測データ: {len(player_guesses)} 件のデータが見つかりました。")
+            # rounds_dataにプレイヤーの推測データを追加
+            function_return_object['player_guesses'].extend(player_guesses)
+        else:
+            print(f"プレイヤー '{player_nick}' の推測データは見つかりませんでした。", file=sys.stderr)
+
+    if not function_return_object['rounds']:
         print("警告: 抽出された game.rounds データが空または見つかりませんでした。", file=sys.stderr)
 
-    return rounds_data
+    return function_return_object
 # --- 補助関数 ---
 
 def _get_street_view_image(api_key: str, pano_id: str, size: str = "640x640", fov: int = 90, heading: int = 0, pitch: int = 0) -> bytes | None:
