@@ -1,21 +1,19 @@
 import base64
 import io
-import re # <= 追加
-from PIL import Image, ImageDraw # <= ImageDrawを追加
-import os # <= 追加
-import concurrent.futures # <= 追加
+import re
+from PIL import Image, ImageDraw, ImageFont
+import os
+import concurrent.futures
 from dotenv import load_dotenv
 from datetime import datetime
-# LangChainとGoogleの関連クラス
-from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 import argparse
 from io import BytesIO
 
-from PIL import Image
 import pycountry
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+from langchain_core.language_models.chat_models import BaseChatModel
 
 # util.py から提供された関数と定数をインポート
 from util import save_street_view_pano_image, get_geoguessr_replay_data, DEFAULT_OUTPUT_DIR
@@ -101,12 +99,11 @@ def parse_and_draw_boxes(text_response: str, original_image: Image.Image, output
     print(f"  バウンディングボックスを描画した画像を {output_path} に保存しました。")
 
 
-def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_path: str, correct_location_str: str) -> dict:
+def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, correct_location_str: str) -> dict:
     """
     LangChainを使い、画像分析とヒント生成を行い、言及箇所を画像に描画します。
-    
     Args:
-        llm: 初期化済みのChatGoogleGenerativeAIモデル。
+        llm: 初期化済みのBaseChatModelモデル。
         image_path: 分析対象の画像ファイルパス。
         correct_location_str: 正解の位置情報文字列。
 
@@ -130,10 +127,11 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
           "【出力形式のルール】\n"
           "1. 推測する場所と、その理由を詳しく述べます。\n"
           "2. 画像内の具体的な特徴に言及する際は、その位置を必ず `BOX(y_min, x_min, y_max, x_max)` という形式で文中に示してください。\n"
-          "3. 座標は画像の左上を(0,0)、右下を(1,1)とする正規化された値です。\n\n"
+          "3. 座標は画像の左上を(0,0)、右下を(1,1)とする正規化された値です。\n"
+          "4. 文字数は全体で3000文字以内にしてください\n\n"
           "--- 以下は出力の例です ---\n"
           "例1:\n"
-          "これは日本の田舎道だと推測します。根拠は、道路の左側に見える軽トラック `BOX(0.65, 0.20, 0.85, 0.45)` と、特徴的な形状の電柱 `BOX(0.20, 0.55, 0.70, 0.65)` です。\n\n"
+          "これは日本の田舎道だと推測します。根拠は、道路の左側に見える軽トラック `BOX(0.65, 0.20, 0.85, 0.45)` と、特徴的な形状の電柱 `BOX(0.20, 0.55, 0.70, 0.65)` です。光沢のある黒い瓦の色から、石川県と推測されます。\n\n"
           "例2:\n"
           "おそらくブラジルでしょう。ポルトガル語で書かれた看板 `BOX(0.40, 0.60, 0.55, 0.80)` があります。また、独特の赤土 `BOX(0.85, 0.0, 1.0, 1.0)` も特徴的です。\n"
           "--- 例はここまで ---\n\n"
@@ -142,7 +140,10 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
         first_message = HumanMessage(
             content=[
                 {"type": "text", "text": first_prompt_text},
-                {"type": "image_url", "image_url": f"data:image/png;base64,{image_b64}"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_b64}"}
+                },
             ]
         )
         chat_history.append(first_message)
@@ -153,12 +154,11 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
         chat_history.append(response1)
 
         print(f"  LLMの予測 (一部): {llm_prediction[:150]}...")
-        # ★予測の応答に基づいて画像に描画
 
         annotated_prediction_path = os.path.join(IMAGE_SAVE_DIR, f"{unique_prefix}_prediction.png")
         parse_and_draw_boxes(llm_prediction, pil_image.copy(), annotated_prediction_path)
 
-        # 2. ２回目のメッセージを作成（正解を伝え、ヒントを依頼 + ★座標出力の指示を追加）
+        # 2. ２回目のメッセージを作成（正解を伝え、ヒントを依頼 + 座標出力の指示を追加）
         print("  LLMに正解を伝え、追加のヒントを依頼中...")
         second_prompt_text = (
             f"ありがとう。実は、この場所の正確な位置は {correct_location_str} でした。"
@@ -172,7 +172,6 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
         response2 = llm.invoke(chat_history)
         llm_hint = response2.content
         print(f"  LLMの追加ヒント (一部): {llm_hint[:150]}...")
-        # ★ヒントの応答に基づいて画像に描画
         annotated_hint_path =  os.path.join(IMAGE_SAVE_DIR,f"{unique_prefix}_annotated_hint.png")
         parse_and_draw_boxes(llm_hint, pil_image.copy(), annotated_hint_path)
 
@@ -197,7 +196,7 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
 
 
 
-def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-05-20"):
+def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-preview-05-20", rounds_to_process_str=None):
 
     # 環境変数からAPIキーを取得
     GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -213,17 +212,44 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
         print("Google CloudコンソールでAPIキーを作成し、環境変数に設定するか、.envファイルに記述してください。")
         return
 
-    try:
-    
-        llm = ChatGoogleGenerativeAI(
-            model=args.model,
-            google_api_key=GOOGLE_API_KEY,
-            temperature=0.3,
-        )
-        print(f"LangChain経由で{args.model} モデルを初期化しました。\n")
-    except Exception as e:
-        print(f"モデルの初期化に失敗しました: {e}")
+    # モデル名のプレフィックスで分岐
+    if model_name.startswith("gemini"):
+        print(f"Geminiモデル ({model_name}) を使用します。")
+        GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not GOOGLE_API_KEY:
+            print("エラー: GEMINI_API_KEY または GOOGLE_API_KEY 環境変数が設定されていません。")
+            return
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=model_name,
+                google_api_key=GOOGLE_API_KEY,
+                temperature=0.5,
+            )
+        except Exception as e:
+            print(f"Geminiモデルの初期化に失敗しました: {e}")
+            return
+            
+    elif model_name.startswith("gpt") or model_name.startswith("o"):
+        print(f"OpenAIモデル ({model_name}) を使用します。")
+        OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+        if not OPENAI_API_KEY:
+            print("エラー: OPENAI_API_KEY環境変数が設定されていません。")
+            return
+        try:
+            llm = ChatOpenAI(
+                model=model_name,
+                openai_api_key=OPENAI_API_KEY,
+                temperature=1.0 if model_name.startswith("o") else 0.5
+            )
+        except Exception as e:
+            print(f"OpenAIモデルの初期化に失敗しました: {e}")
+            return
+    else:
+        print(f"エラー: サポートされていないモデル名です: {model_name}")
+        print("モデル名は 'gemini-' または 'gpt-' で始まる必要があります。")
         return
+    
+    print(f"LangChain経由で {model_name} モデルを正常に初期化しました。\n")
 
     # Markdownファイル名を生成
     markdown_output_file = make_markdown_output_file(geoguessr_replay_url)
@@ -244,6 +270,33 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
     except Exception as e:
         print(f"リプレイデータの取得中に予期せぬエラーが発生しました: {e}")
         return
+
+    # 指定されたラウンドのみを処理するためのフィルタリングロジック
+    if rounds_to_process_str:
+        try:
+            # カンマで分割し、空白を除去し、整数に変換してセットを作成
+            specified_rounds = {int(r.strip()) for r in rounds_to_process_str.split(',')}
+            print(f"指定されたラウンド {sorted(list(specified_rounds))} のみを処理します。")
+            
+            # replay_data['rounds']をフィルタリング
+            original_rounds_data = replay_data['rounds']
+            rounds_to_process = [
+                round_data for round_data in original_rounds_data
+                if round_data.get("roundNumber") in specified_rounds
+            ]
+            
+            if not rounds_to_process:
+                print("指定されたラウンド番号に一致するデータが見つかりませんでした。処理を終了します。")
+                return
+            
+            # 処理対象のラウンドリストを上書き
+            replay_data['rounds'] = rounds_to_process
+            print(f"フィルタリング後の処理対象ラウンド数: {len(replay_data['rounds'])}")
+
+        except ValueError:
+            print("エラー: --rounds の指定が正しくありません。ラウンド番号をカンマ区切りで指定してください (例: 1,3,5)。")
+            return
+    # --- フィルタリングロジックここまで ---
 
     review_results = []
 
@@ -277,7 +330,7 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
         correct_location_str = f"{correct_country_name} (Lat: {lat:.4f}, Lng: {lng:.4f})"
 
         if replay_player_guesses:
-            player_guess = replay_player_guesses[i] if i < len(replay_player_guesses) else None
+            player_guess = next((g for g in replay_player_guesses if g.get("roundNumber") == round_number), None)
             if player_guess:
                 guess_lat = player_guess.get("lat")
                 guess_lng = player_guess.get("lng")
@@ -366,8 +419,8 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
     # 結果をMarkdown形式で出力
     print(f"\\n--- レビュー結果を '{markdown_output_file}' に出力中 ---")
     with open(markdown_output_file, "w", encoding="utf-8") as f:
-        f.write("# GeoGuessr 反省レポート\n\n")
-        f.write(f"**リプレイURL**: {geoguessr_replay_url}\n\n")
+        f.write("# GeoGuessr 振り返りレポート\n\n")
+        f.write(f"**リプレイURL**: {geoguessr_replay_url}\n\n**担当モデル**: {model_name}\n")
         f.write("---\n\n")
 
         if not review_results:
@@ -423,7 +476,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GeoGuessrリプレイURLとCookieファイルを指定してレポートを生成します。")
     parser.add_argument("--url", required=True, help="GeoGuessrのリプレイURL (例: https://www.geoguessr.com/duels/xxxx/replay)")
     parser.add_argument("--cookie", required=True, help="GeoGuessrのCookieファイルパス (例: cookies.txt)")
-    parser.add_argument("--model", default="gemini-2.5-flash-preview-05-20", help="使用するGeminiモデル (デフォルト: gemini-2.5-flash-preview-05-20)")
+    parser.add_argument(
+        "--model", 
+        default="gemini-2.5-flash-preview-05-20", 
+        help="使用するLLMモデル名。'gemini-'か'gpt-'で始まる名前を指定 (例: gemini-1.5-flash, gpt-4o)。(デフォルト: gemini-2.5-flash-preview-05-20)"
+    )
     parser.add_argument("--player_nickname", default="LangChain", help="プレイヤーのニックネーム (デフォルト: LangChain)")
+    parser.add_argument(
+        "--rounds",
+        type=str,
+        default=None,
+        help="処理するラウンド番号をカンマ区切りで指定します (例: 2,4)。指定しない場合は全ラウンドを処理します。"
+    )
+
+    
     args = parser.parse_args()
-    main(args.url, args.cookie, args.model)
+    main(args.url, args.cookie, args.model, args.rounds)
