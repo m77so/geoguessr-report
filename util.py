@@ -229,7 +229,7 @@ def save_street_view_pano_image(
         if not api_key:
             print("エラー: APIキーが指定されておらず、STREET_API_KEY環境変数も設定されていません。", file=sys.stderr)
             return None
-        
+
     # 出力ディレクトリを作成
     if not os.path.exists(output_dir):
         try:
@@ -246,6 +246,13 @@ def save_street_view_pano_image(
         return None
 
     print(f"\n処理開始: パノラマID '{pano_id}' (元の16進数: {hex_pano_id})")
+
+    stitched_file_name = os.path.join(output_dir, f"street_view_{pano_id}_full_pano_smooth.jpg")
+
+    # ファイルが既に存在するかチェック
+    if os.path.exists(stitched_file_name):
+        print(f"画像 '{stitched_file_name}' は既に存在するため、ダウンロードをスキップします。")
+        return stitched_file_name
     
     downloaded_image_paths = []
     
