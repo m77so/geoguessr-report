@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import argparse
 from io import BytesIO
+import requests # 追加
 
 import pycountry
 from langchain_core.messages import HumanMessage, AIMessage
@@ -49,6 +50,28 @@ def get_country_name(country_code: str) -> str:
     except Exception:
         # エラーが発生した場合も国コードをそのまま返す
         return country_code
+
+def get_address_from_coords(lat: float, lng: float, api_key: str, language: str = "ja") -> str | None:
+    """
+    緯度経度からGoogle Geocoding APIを使用して住所を取得します。
+    """
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lng}&key={api_key}&language={language}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # HTTPエラーがあれば例外を発生させる
+        data = response.json()
+        if data.get("status") == "OK" and data.get("results"):
+            # 複数の結果から最も適切と思われるものを選択（通常は最初のもの）
+            return data["results"][0].get("formatted_address")
+        else:
+            print(f"  Geocoding APIから有効な結果が得られませんでした: {data.get('status')}, {data.get('error_message')}")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"  Geocoding APIへのリクエスト中にエラーが発生しました: {e}")
+        return None
+    except Exception as e:
+        print(f"  住所の解析中に予期せぬエラーが発生しました: {e}")
+        return None
 
 def image_to_base64(pil_image: Image.Image) -> str:
     """PillowイメージをBase64エンコードされた文字列に変換します。"""
@@ -327,7 +350,16 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
         # This print might interleave in parallel execution, consider logging or removing for cleaner output
         print(f"--- ラウンド {round_number} の処理を開始 ---")
         correct_country_name = get_country_name(country_code)
-        correct_location_str = f"{correct_country_name} (Lat: {lat:.4f}, Lng: {lng:.4f})"
+        
+        # Geocoding APIを使用して住所を取得
+        formatted_address = get_address_from_coords(lat, lng, street_api_key_val)
+        
+        if formatted_address:
+            correct_location_str = f"住所: {formatted_address} (国: {correct_country_name}, 緯度: {lat:.4f}, 経度: {lng:.4f})"
+        else:
+            # 住所取得に失敗した場合は従来通りの形式
+            correct_location_str = f"{correct_country_name} (緯度: {lat:.4f}, 経度: {lng:.4f})"
+
 
         if replay_player_guesses:
             player_guess = next((g for g in replay_player_guesses if g.get("roundNumber") == round_number), None)
@@ -335,7 +367,11 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
                 guess_lat = player_guess.get("lat")
                 guess_lng = player_guess.get("lng")
                 if guess_lat is not None and guess_lng is not None:
-                    correct_location_str += f" 、プレイヤーの推測は: （Lat: {guess_lat:.4f}, Lng: {guess_lng:.4f})"
+                    formatted_address = get_address_from_coords(guess_lat, guess_lng, street_api_key_val)
+                    if formatted_address:
+                        correct_location_str += f" 、プレイヤーの推測は: {formatted_address} （Lat: {guess_lat:.4f}, Lng: {guess_lng:.4f})"
+                    else:
+                        correct_location_str += f" 、プレイヤーの推測は: （Lat: {guess_lat:.4f}, Lng: {guess_lng:.4f})"
                 else:
                     # This print might interleave
                     print(f"  ラウンド {round_number} のプレイヤーの推測が不完全なため、正解の場所のみを表示します。")

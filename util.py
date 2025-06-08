@@ -204,7 +204,7 @@ def save_street_view_pano_image(
     image_size: str = "640x640",
     fov: int = 90,
     pitch: int = 0,
-    target_height: int = 620, # 連結後のトリミング高さ
+    target_height: int = 640, # 連結後のトリミング高さ
     api_key: str = None
 ) -> str | None:
     """
