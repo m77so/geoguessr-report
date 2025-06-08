@@ -126,6 +126,7 @@ def analyze_round_with_langchain_and_boxes(llm: ChatGoogleGenerativeAI, image_pa
         # 1. 最初のメッセージを作成（場所の予測依頼 + ★座標出力の指示を追加）
         first_prompt_text = (
           "あなたはGeoGuessrの専門家です。ストリートビュー画像から場所を推測し、その根拠を画像内の特徴と関連付けて説明してください。類似している地域を否定する理由も述べてください\n\n"
+          "添付される画像はGeoGuessrのストリートビュー画像です。左から、北、東、南、西を向いた画像を張り合わせたものです。\n\n"
           "【出力形式のルール】\n"
           "1. 推測する場所と、その理由を詳しく述べます。\n"
           "2. 画像内の具体的な特徴に言及する際は、その位置を必ず `BOX(y_min, x_min, y_max, x_max)` という形式で文中に示してください。\n"
@@ -328,7 +329,7 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
     # Adjust max_workers based on your system and API rate limits
     # Using a small number like 5 to avoid overwhelming the LLM API or local resources
     # If the LLM API has strict rate limits, a lower number or sequential processing might still be necessary.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         # Using map to preserve order, though sorting later anyway
         # review_results_unordered = list(executor.map(process_round_task, tasks_args))
         
