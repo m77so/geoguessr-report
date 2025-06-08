@@ -3,6 +3,7 @@ import io
 import re # <= 追加
 from PIL import Image, ImageDraw # <= ImageDrawを追加
 import os # <= 追加
+import concurrent.futures # <= 追加
 from dotenv import load_dotenv
 from datetime import datetime
 # LangChainとGoogleの関連クラス
@@ -245,7 +246,9 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
 
     review_results = []
 
-    for i, round_data in enumerate(replay_data['rounds']):
+    # Helper function to process a single round
+    def process_round_task(args_tuple):
+        i, round_data, llm_model, street_api_key_val, replay_player_guesses, image_save_dir_val = args_tuple
         round_number = round_data.get("roundNumber", i + 1)
         panorama = round_data.get("panorama", {})
         pano_id = panorama.get("panoId")
@@ -257,61 +260,110 @@ def main(geoguessr_replay_url,cookie_file_path, model="gemini-2.5-flash-preview-
         if not all([pano_id, lat is not None, lng is not None, country_code]):
             print(f"--- ラウンド {round_number} ---")
             print("  必要なデータ (panoId, lat, lng, countryCode) が不完全なため、スキップします。")
-            review_results.append({
+            return {
                 "round_number": round_number,
                 "status": "データ不完全",
                 "correct_location": "N/A",
                 "image_path": "N/A",
                 "llm_prediction": "N/A",
-                "llm_hint": "N/A"
-            })
-            continue
+                "llm_hint": "N/A",
+                "error": "Incomplete data" # Add error field for consistency
+            }
 
-        print(f"\n--- ラウンド {round_number} の処理を開始 ---")
+        # This print might interleave in parallel execution, consider logging or removing for cleaner output
+        print(f"--- ラウンド {round_number} の処理を開始 ---")
         correct_country_name = get_country_name(country_code)
         correct_location_str = f"{correct_country_name} (Lat: {lat:.4f}, Lng: {lng:.4f})"
 
-        if replay_data.get("player_guesses"):
-            player_guess = replay_data["player_guesses"][i] if i < len(replay_data["player_guesses"]) else None
+        if replay_player_guesses:
+            player_guess = replay_player_guesses[i] if i < len(replay_player_guesses) else None
             if player_guess:
                 guess_lat = player_guess.get("lat")
                 guess_lng = player_guess.get("lng")
                 if guess_lat is not None and guess_lng is not None:
                     correct_location_str += f" 、プレイヤーの推測は: （Lat: {guess_lat:.4f}, Lng: {guess_lng:.4f})"
                 else:
+                    # This print might interleave
                     print(f"  ラウンド {round_number} のプレイヤーの推測が不完全なため、正解の場所のみを表示します。")
+        
         # 1. 画像のダウンロード
-        print(f"  パノラマID '{pano_id}' の画像をダウンロード中...")
-        image_path = save_street_view_pano_image(pano_id, output_dir=IMAGE_SAVE_DIR, api_key=STREET_API_KEY)
+        # This print might interleave
+        print(f"  ラウンド {round_number}: パノラマID '{pano_id}' の画像をダウンロード中...")
+        image_path = save_street_view_pano_image(pano_id, output_dir=image_save_dir_val, api_key=street_api_key_val)
 
         if not image_path or not os.path.exists(image_path):
+            # This print might interleave
             print(f"  エラー: ラウンド {round_number} の画像ダウンロードに失敗しました。スキップします。")
-            review_results.append({
+            return {
                 "round_number": round_number,
                 "status": "画像ダウンロード失敗",
                 "correct_location": correct_location_str,
                 "image_path": "N/A",
                 "llm_prediction": "N/A",
-                "llm_hint": "N/A"
-            })
-            continue
-        print(f"  画像が '{image_path}' に保存されました。")
+                "llm_hint": "N/A",
+                "error": "Image download failed" # Add error field
+            }
+        # This print might interleave
+        print(f"  ラウンド {round_number}: 画像が '{image_path}' に保存されました。")
 
         # 2. LangChainを使って画像分析
-        analysis = analyze_round_with_langchain_and_boxes(llm, image_path, correct_location_str)
+        analysis = analyze_round_with_langchain_and_boxes(llm_model, image_path, correct_location_str)
 
         # 3. 結果をまとめる
         status = "成功" if analysis["error"] is None else f"LLMエラー: {analysis['error']}"
-        review_results.append({
+        return {
             "round_number": round_number,
             "status": status,
             "correct_location": correct_location_str,
             "image_path": image_path,
             **analysis # llm_predictionとllm_hintを展開して追加
-        })
+        }
+
+    # Prepare arguments for each task
+    tasks_args = []
+    for i, round_data_item in enumerate(replay_data['rounds']):
+        tasks_args.append((i, round_data_item, llm, STREET_API_KEY, replay_data.get("player_guesses"), IMAGE_SAVE_DIR))
+
+    # Use ThreadPoolExecutor to process rounds in parallel
+    # Adjust max_workers based on your system and API rate limits
+    # Using a small number like 5 to avoid overwhelming the LLM API or local resources
+    # If the LLM API has strict rate limits, a lower number or sequential processing might still be necessary.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Using map to preserve order, though sorting later anyway
+        # review_results_unordered = list(executor.map(process_round_task, tasks_args))
+        
+        # Using submit and as_completed for potentially faster perceived progress if some tasks are slow
+        future_to_round_args = {executor.submit(process_round_task, task_arg): task_arg for task_arg in tasks_args}
+        review_results_unordered = []
+        for future in concurrent.futures.as_completed(future_to_round_args):
+            try:
+                data = future.result()
+                review_results_unordered.append(data)
+            except Exception as exc:
+                # This part handles exceptions raised directly by the task function if not caught inside
+                # For example, if process_round_task itself had an unhandled exception
+                # However, process_round_task is designed to catch its own errors and return a dict
+                original_task_args = future_to_round_args[future]
+                round_idx = original_task_args[0]
+                round_num_fallback = replay_data['rounds'][round_idx].get("roundNumber", round_idx + 1)
+                print(f'ラウンド {round_num_fallback} の処理中にエラーが発生しました: {exc}')
+                review_results_unordered.append({
+                    "round_number": round_num_fallback,
+                    "status": f"並列処理エラー: {exc}",
+                    "correct_location": "N/A",
+                    "image_path": "N/A",
+                    "llm_prediction": "N/A",
+                    "llm_hint": "N/A",
+                    "error": str(exc)
+                })
+
+
+    # Sort results by round_number to ensure the report is in order
+    review_results = sorted(review_results_unordered, key=lambda x: x.get("round_number", float('inf')))
+
 
     # 結果をMarkdown形式で出力
-    print(f"\n--- レビュー結果を '{markdown_output_file}' に出力中 ---")
+    print(f"\\n--- レビュー結果を '{markdown_output_file}' に出力中 ---")
     with open(markdown_output_file, "w", encoding="utf-8") as f:
         f.write("# GeoGuessr 反省レポート\n\n")
         f.write(f"**リプレイURL**: {geoguessr_replay_url}\n\n")
