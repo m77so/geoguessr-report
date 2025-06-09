@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import json
 from PIL import Image # Pillowライブラリをインポート
 import sys # エラーメッセージをsys.stderrに出力するため
+import io # バイナリデータ処理用
 
 # Pillowがインストールされていない場合は pip install Pillow を実行してください
 
@@ -247,7 +248,7 @@ def save_street_view_pano_image(
 
     print(f"\n処理開始: パノラマID '{pano_id}' (元の16進数: {hex_pano_id})")
 
-    stitched_file_name = os.path.join(output_dir, f"street_view_{pano_id}_full_pano_smooth.jpg")
+    stitched_file_name = os.path.join(output_dir, f"street_view_{pano_id}_full_pano_smooth.webp")
 
     # ファイルが既に存在するかチェック
     if os.path.exists(stitched_file_name):
@@ -277,20 +278,19 @@ def save_street_view_pano_image(
                                             fov=fov, 
                                             heading=d, 
                                             pitch=pitch)
-
         if image_data:
-            # 個々のダウンロード画像を一時的に保存 (連結後に削除することも可能)
-            # 今回はユーザーの元のコードに合わせて削除しない
-            file_name = os.path.join(output_dir, f"street_view_{pano_id}_h{d:03}.jpg")
+            # 個々のダウンロード画像をWebP形式で保存
+            # JPEGデータをPillowで読み込んでWebPとして再保存
             try:
-                with open(file_name, "wb") as f:
-                    f.write(image_data)
+                temp_image = Image.open(io.BytesIO(image_data))
+                file_name = os.path.join(output_dir, f"street_view_{pano_id}_h{d:03}.webp")
+                temp_image.save(file_name, format="WebP", quality=85, optimize=True)
                 print(f"  画像を '{file_name}' に保存しました。")
                 downloaded_image_paths.append(file_name)
-            except IOError as e:
+            except Exception as e:
                 print(f"  エラー: ファイル '{file_name}' の保存に失敗しました: {e}", file=sys.stderr)
                 # エラーが発生したら、このパノラマIDの処理は中断する
-                return None 
+                return None
         else:
             print(f"  パノラマID '{pano_id}' の heading={d} の画像の取得に失敗しました。このパノラマIDの処理を中止します。", file=sys.stderr)
             # 1枚でも失敗したら連結できないので、Noneを返す
@@ -337,9 +337,10 @@ def save_street_view_pano_image(
         else:
             print(f"  警告: 連結後の画像の高さ ({stitched_image.height}px) がトリミング目標 ({target_height}px) より小さいか同じです。トリミングはスキップされました。", file=sys.stderr)
 
-        stitched_file_name = os.path.join(output_dir, f"street_view_{pano_id}_full_pano_smooth.jpg")
+        stitched_file_name = os.path.join(output_dir, f"street_view_{pano_id}_full_pano_smooth.webp")
         try:
-            stitched_image.save(stitched_file_name)
+            # WebP形式で品質85%、最適化して保存
+            stitched_image.save(stitched_file_name, format='WebP', quality=85, optimize=True)
             print(f"  連結された画像を '{stitched_file_name}' に保存しました。")
             return stitched_file_name
         except IOError as e:

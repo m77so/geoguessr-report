@@ -76,7 +76,8 @@ def get_address_from_coords(lat: float, lng: float, api_key: str, language: str 
 def image_to_base64(pil_image: Image.Image) -> str:
     """PillowイメージをBase64エンコードされた文字列に変換します。"""
     buffered = io.BytesIO()
-    pil_image.save(buffered, format="PNG")
+    # WebP形式で高圧縮率で保存（品質85%、ロスレス圧縮も試す場合はlossless=True）
+    pil_image.save(buffered, format="WebP", quality=85, optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def parse_and_draw_boxes(text_response: str, original_image: Image.Image, output_path: str):
@@ -87,15 +88,14 @@ def parse_and_draw_boxes(text_response: str, original_image: Image.Image, output
         text_response: LLMからの応答テキスト。
         original_image: 描画対象のPillowイメージオブジェクト。
         output_path: 描画後の画像を保存するパス。
-    """
-    # 正規表現で BOX(y_min, x_min, y_max, x_max) 形式の文字列をすべて探し出す
+    """    # 正規表現で BOX(y_min, x_min, y_max, x_max) 形式の文字列をすべて探し出す
     # 座標値は浮動小数点数も考慮
     boxes = re.findall(r"BOX\((\d+\.?\d*),\s*(\d+\.?\d*),\s*(\d+\.?\d*),\s*(\d+\.?\d*)\)", text_response)
     
     if not boxes:
         print("  描画対象のバウンディングボックスは見つかりませんでした。")
-        # ボックスが見つからなくても元の画像を保存する
-        original_image.save(output_path)
+        # ボックスが見つからなくても元の画像を保存する（WebP高圧縮）
+        original_image.save(output_path, format="WebP", quality=85, optimize=True)
         return
 
     draw = ImageDraw.Draw(original_image)
@@ -118,7 +118,8 @@ def parse_and_draw_boxes(text_response: str, original_image: Image.Image, output
         # 座標の近くに番号を描画して、どの言及に対応するか分かりやすくする
         draw.text((left + 5, top + 5), f"BOX {i+1}", fill="white", font_size=20)
 
-    original_image.save(output_path)
+    # WebP高圧縮で保存
+    original_image.save(output_path, format="WebP", quality=85, optimize=True)
     print(f"  バウンディングボックスを描画した画像を {output_path} に保存しました。")
 
 
@@ -178,7 +179,7 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
 
         print(f"  LLMの予測 (一部): {llm_prediction[:150]}...")
 
-        annotated_prediction_path = os.path.join(IMAGE_SAVE_DIR, f"{unique_prefix}_prediction.png")
+        annotated_prediction_path = os.path.join(IMAGE_SAVE_DIR, f"{unique_prefix}_prediction.webp")
         parse_and_draw_boxes(llm_prediction, pil_image.copy(), annotated_prediction_path)
 
         # 2. ２回目のメッセージを作成（正解を伝え、ヒントを依頼 + 座標出力の指示を追加）
@@ -195,7 +196,7 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
         response2 = llm.invoke(chat_history)
         llm_hint = response2.content
         print(f"  LLMの追加ヒント (一部): {llm_hint[:150]}...")
-        annotated_hint_path =  os.path.join(IMAGE_SAVE_DIR,f"{unique_prefix}_annotated_hint.png")
+        annotated_hint_path =  os.path.join(IMAGE_SAVE_DIR,f"{unique_prefix}_annotated_hint.webp")
         parse_and_draw_boxes(llm_hint, pil_image.copy(), annotated_hint_path)
 
 
