@@ -123,11 +123,12 @@ def parse_and_draw_boxes(text_response: str, original_image: Image.Image, output
     print(f"  バウンディングボックスを描画した画像を {output_path} に保存しました。")
 
 
-def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, correct_location_str: str) -> dict:
+def analyze_round_with_langchain_and_boxes(first_llm: BaseChatModel, second_llm: BaseChatModel, image_path: str, correct_location_str: str) -> dict:
     """
     LangChainを使い、画像分析とヒント生成を行い、言及箇所を画像に描画します。
     Args:
-        llm: 初期化済みのBaseChatModelモデル。
+        first_llm: 初期化済みのBaseChatModelモデル。
+        second_llm: 初期化済みのBaseChatModelモデル。
         image_path: 分析対象の画像ファイルパス。
         correct_location_str: 正解の位置情報文字列。
 
@@ -141,6 +142,11 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         unique_prefix = f"{base_name}_{timestamp_str}"
+        total_tokens = {
+            "pro_prompt": 0, "pro_output": 0, "pro_total": 0,
+            "flash_prompt": 0, "flash_output": 0, "flash_total": 0,
+            "grand_total": 0
+        }
 
         chat_history = []
 
@@ -171,10 +177,17 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
             ]
         )
         chat_history.append(first_message)
-        
-        response1 = llm.invoke(chat_history)
+
+        response1 = first_llm.invoke(chat_history)
         llm_prediction = response1.content
-        print(response1)
+        # ... (response1 = first_llm.invoke(chat_history) の直後) ...
+        llm_prediction = response1.content
+        if response1.usage_metadata:
+            usage1 = response1.usage_metadata
+            total_tokens["pro_prompt"] = usage1.get("input_tokens", 0)
+            total_tokens["pro_output"] = usage1.get("output_tokens", 0)
+            total_tokens["pro_total"] = usage1.get("total_tokens", 0)
+            print(f"  [Pro Usage] Input: {total_tokens['pro_prompt']}, Output: {total_tokens['pro_output']}, Total: {total_tokens['pro_total']} tokens")
         chat_history.append(response1)
 
         print(f"  LLMの予測 (一部): {llm_prediction[:150]}...")
@@ -193,9 +206,15 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
         second_message = HumanMessage(content=second_prompt_text)
         chat_history.append(second_message)
 
-        response2 = llm.invoke(chat_history)
+        response2 = second_llm.invoke(chat_history)
         llm_hint = response2.content
         print(f"  LLMの追加ヒント (一部): {llm_hint[:150]}...")
+        if response2.usage_metadata:
+            usage2 = response2.usage_metadata
+            total_tokens["flash_prompt"] = usage2.get("input_tokens", 0)
+            total_tokens["flash_output"] = usage2.get("output_tokens", 0)
+            total_tokens["flash_total"] = usage2.get("total_tokens", 0)
+            print(f"  [Flash Usage] Input: {total_tokens['flash_prompt']}, Output: {total_tokens['flash_output']}, Total: {total_tokens['flash_total']} tokens")
         annotated_hint_path =  os.path.join(IMAGE_SAVE_DIR,f"{unique_prefix}_annotated_hint.webp")
         parse_and_draw_boxes(llm_hint, pil_image.copy(), annotated_hint_path)
 
@@ -205,7 +224,8 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
             "annotated_prediction_path": annotated_prediction_path,
             "llm_hint": llm_hint,
             "annotated_hint_path": annotated_hint_path,
-            "error": None
+            "error": None,
+            "total_tokens": total_tokens
         }
 
     except Exception as e:
@@ -218,9 +238,25 @@ def analyze_round_with_langchain_and_boxes(llm: BaseChatModel, image_path: str, 
             "error": f"{type(e).__name__}: {e}"
         }
 
+def get_llm_cost(total_tokens: dict) -> float:
+    PRO_INPUT_PRICE_PER_MILLION = 1.25  # USD
+    PRO_OUTPUT_PRICE_PER_MILLION = 10.0 # USD
+    FLASH_INPUT_PRICE_PER_MILLION = 0.15  # USD
+    FLASH_OUTPUT_PRICE_PER_MILLION = 3.5 # USD
 
+    # 上記の関数で取得したtotal_tokensディクショナリを使って計算
+    pro_cost = (total_tokens["pro_prompt"] / 1_000_000 * PRO_INPUT_PRICE_PER_MILLION) + \
+            (total_tokens["pro_output"] / 1_000_000 * PRO_OUTPUT_PRICE_PER_MILLION)
 
-def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-preview-05-20", rounds_to_process_str=None):
+    flash_cost = (total_tokens["flash_prompt"] / 1_000_000 * FLASH_INPUT_PRICE_PER_MILLION) + \
+                (total_tokens["flash_output"] / 1_000_000 * FLASH_OUTPUT_PRICE_PER_MILLION)
+
+    total_cost = pro_cost + flash_cost
+
+    print(f"今回の分析コスト: 約${total_cost:.6f}")
+    return total_cost
+
+def main(geoguessr_replay_url,cookie_file_path, first_model_name="gemini-2.5-flash-preview-05-20", second_model_name="gemini-2.5-flash-preview-05-20", rounds_to_process_str=None):
 
     # 環境変数からAPIキーを取得
     GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -236,44 +272,52 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
         print("Google CloudコンソールでAPIキーを作成し、環境変数に設定するか、.envファイルに記述してください。")
         return
 
-    # モデル名のプレフィックスで分岐
-    if model_name.startswith("gemini"):
-        print(f"Geminiモデル ({model_name}) を使用します。")
-        GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not GOOGLE_API_KEY:
-            print("エラー: GEMINI_API_KEY または GOOGLE_API_KEY 環境変数が設定されていません。")
-            return
-        try:
-            llm = ChatGoogleGenerativeAI(
-                model=model_name,
-                google_api_key=GOOGLE_API_KEY,
-                temperature=0.5,
-            )
-        except Exception as e:
-            print(f"Geminiモデルの初期化に失敗しました: {e}")
-            return
-            
-    elif model_name.startswith("gpt") or model_name.startswith("o"):
-        print(f"OpenAIモデル ({model_name}) を使用します。")
-        OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-        if not OPENAI_API_KEY:
-            print("エラー: OPENAI_API_KEY環境変数が設定されていません。")
-            return
-        try:
-            llm = ChatOpenAI(
-                model=model_name,
-                openai_api_key=OPENAI_API_KEY,
-                temperature=1.0 if model_name.startswith("o") else 0.5
-            )
-        except Exception as e:
-            print(f"OpenAIモデルの初期化に失敗しました: {e}")
-            return
-    else:
-        print(f"エラー: サポートされていないモデル名です: {model_name}")
-        print("モデル名は 'gemini-' または 'gpt-' で始まる必要があります。")
-        return
-    
-    print(f"LangChain経由で {model_name} モデルを正常に初期化しました。\n")
+    def init_model(model_name: str) -> BaseChatModel:
+        """
+        モデル名に応じて適切なLLMを初期化します。
+        """
+        # モデル名のプレフィックスで分岐
+        if model_name.startswith("gemini"):
+            print(f"Geminiモデル ({model_name}) を使用します。")
+            GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            if not GOOGLE_API_KEY:
+                print("エラー: GEMINI_API_KEY または GOOGLE_API_KEY 環境変数が設定されていません。")
+                return
+            try:
+                llm = ChatGoogleGenerativeAI(
+                    model=model_name,
+                    google_api_key=GOOGLE_API_KEY,
+                    temperature=0.5,
+                )
+            except Exception as e:
+                print(f"Geminiモデルの初期化に失敗しました: {e}")
+                return None
+                
+        elif model_name.startswith("gpt") or model_name.startswith("o"):
+            print(f"OpenAIモデル ({model_name}) を使用します。")
+            OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+            if not OPENAI_API_KEY:
+                print("エラー: OPENAI_API_KEY環境変数が設定されていません。")
+                return
+            try:
+                llm = ChatOpenAI(
+                    model=model_name,
+                    openai_api_key=OPENAI_API_KEY,
+                    temperature=1.0 if model_name.startswith("o") else 0.5
+                )
+            except Exception as e:
+                print(f"OpenAIモデルの初期化に失敗しました: {e}")
+                return None
+        else:
+            print(f"エラー: サポートされていないモデル名です: {model_name}")
+            print("モデル名は 'gemini-' または 'gpt-' で始まる必要があります。")
+            return None
+
+        print(f"LangChain経由で {model_name} モデルを正常に初期化しました。\n")
+        return llm
+
+    first_llm = init_model(first_model_name)
+    second_llm = init_model(second_model_name)
 
     # Markdownファイル名を生成
     markdown_output_file = make_markdown_output_file(geoguessr_replay_url)
@@ -326,7 +370,7 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
 
     # Helper function to process a single round
     def process_round_task(args_tuple):
-        i, round_data, llm_model, street_api_key_val, replay_player_guesses, image_save_dir_val = args_tuple
+        i, round_data, first_llm_model, second_llm_model, street_api_key_val, replay_player_guesses, image_save_dir_val = args_tuple
         round_number = round_data.get("roundNumber", i + 1)
         panorama = round_data.get("panorama", {})
         pano_id = panorama.get("panoId")
@@ -398,7 +442,7 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
         print(f"  ラウンド {round_number}: 画像が '{image_path}' に保存されました。")
 
         # 2. LangChainを使って画像分析
-        analysis = analyze_round_with_langchain_and_boxes(llm_model, image_path, correct_location_str)
+        analysis = analyze_round_with_langchain_and_boxes(first_llm_model, second_llm_model, image_path, correct_location_str)
 
         # 3. 結果をまとめる
         status = "成功" if analysis["error"] is None else f"LLMエラー: {analysis['error']}"
@@ -413,7 +457,7 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
     # Prepare arguments for each task
     tasks_args = []
     for i, round_data_item in enumerate(replay_data['rounds']):
-        tasks_args.append((i, round_data_item, llm, STREET_API_KEY, replay_data.get("player_guesses"), IMAGE_SAVE_DIR))
+        tasks_args.append((i, round_data_item, first_llm, second_llm, STREET_API_KEY, replay_data.get("player_guesses"), IMAGE_SAVE_DIR))
 
     # Use ThreadPoolExecutor to process rounds in parallel
     # Adjust max_workers based on your system and API rate limits
@@ -457,7 +501,7 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
     print(f"\\n--- レビュー結果を '{markdown_output_file}' に出力中 ---")
     with open(markdown_output_file, "w", encoding="utf-8") as f:
         f.write("# GeoGuessr 振り返りレポート\n\n")
-        f.write(f"**リプレイURL**: {geoguessr_replay_url}\n\n**担当モデル**: {model_name}\n")
+        f.write(f"**リプレイURL**: {geoguessr_replay_url}\n\n**担当モデル**: {first_model_name} {',' + second_model_name if first_model_name != second_model_name else ''}\n")
         f.write("---\n\n")
 
         if not review_results:
@@ -504,6 +548,13 @@ def main(geoguessr_replay_url,cookie_file_path, model_name="gemini-2.5-flash-pre
                     f.write(f"#### LLMが注目した箇所 (ヒント時)\n")
                     relative_hint_img_path = os.path.relpath(annotated_hint_path, start=os.path.dirname(markdown_output_file))
                     f.write(f"![ヒントの注釈付き画像]({relative_hint_img_path.replace(os.path.sep, '/')})\n\n")
+                
+                total_token = result.get("total_tokens", {})
+                print(f"  ラウンド {result['round_number']} のトークン使用量: {total_token}")
+                if total_token:
+                    total_cost = get_llm_cost(total_token)
+                    if total_cost > 0:
+                        f.write(f"**今回の分析コスト**: 約${total_cost:.6f} USD\n\n")
                     
                 f.write("---\n\n")
 
@@ -514,7 +565,12 @@ if __name__ == "__main__":
     parser.add_argument("--url", required=True, help="GeoGuessrのリプレイURL (例: https://www.geoguessr.com/duels/xxxx/replay)")
     parser.add_argument("--cookie", required=True, help="GeoGuessrのCookieファイルパス (例: cookies.txt)")
     parser.add_argument(
-        "--model", 
+        "--first-model", 
+        default="gemini-2.5-flash-preview-05-20", 
+        help="使用するLLMモデル名。'gemini-'か'gpt-'で始まる名前を指定 (例: gemini-1.5-flash, gpt-4o)。(デフォルト: gemini-2.5-flash-preview-05-20)"
+    )
+    parser.add_argument(
+        "--second-model", 
         default="gemini-2.5-flash-preview-05-20", 
         help="使用するLLMモデル名。'gemini-'か'gpt-'で始まる名前を指定 (例: gemini-1.5-flash, gpt-4o)。(デフォルト: gemini-2.5-flash-preview-05-20)"
     )
@@ -528,4 +584,4 @@ if __name__ == "__main__":
 
     
     args = parser.parse_args()
-    main(args.url, args.cookie, args.model, args.rounds)
+    main(args.url, args.cookie, args.first_model, args.second_model, args.rounds)
